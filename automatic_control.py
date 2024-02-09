@@ -234,10 +234,6 @@ class World(object):
         """Render world"""
         self.camera_manager.render(display)
         self.hud.render(display)
-        #print out yolo
-        if self.camera_manager.img is not None:
-            results = yolo_model(self.camera_manager.img)
-            results.print()
 
     def destroy_sensors(self):
         """Destroy sensors"""
@@ -608,8 +604,6 @@ class GnssSensor(object):
 # -- CameraManager -------------------------------------------------------------
 # ==============================================================================
 
-yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-
 class CameraManager(object):
     """ Class for camera management"""
 
@@ -720,8 +714,25 @@ class CameraManager(object):
 # -- Game Loop ---------------------------------------------------------
 # ==============================================================================
 
+def game_step(clock, world, controller, display, agent, spawn_points):
+    clock.tick()
+    if args.sync:
+        world.world.tick()
+    else:
+        world.world.wait_for_tick()
+    if controller.parse_events():
+        return
 
-def game_loop(args):
+    world.tick(clock)
+    world.render(display)
+    pygame.display.flip()
+
+    control = agent.run_step()
+    control.manual_gear_shift = False
+    world.player.apply_control(control)
+
+
+def game_start(args):
     """
     Main loop of the simulation. It handles updating all the HUD information,
     ticking the agent and, if needed, the world.
@@ -731,88 +742,50 @@ def game_loop(args):
     pygame.font.init()
     world = None
 
-    try:
-        if args.seed:
-            random.seed(args.seed)
+    if args.seed:
+        random.seed(args.seed)
 
-        client = carla.Client(args.host, args.port)
-        client.set_timeout(60.0)
+    client = carla.Client(args.host, args.port)
+    client.set_timeout(60.0)
 
-        traffic_manager = client.get_trafficmanager()
-        sim_world = client.get_world()
+    traffic_manager = client.get_trafficmanager()
+    sim_world = client.get_world()
 
-        if args.sync:
-            settings = sim_world.get_settings()
-            settings.synchronous_mode = True
-            settings.fixed_delta_seconds = 0.05
-            sim_world.apply_settings(settings)
+    if args.sync:
+        settings = sim_world.get_settings()
+        settings.synchronous_mode = True
+        settings.fixed_delta_seconds = 0.05
+        sim_world.apply_settings(settings)
 
-            traffic_manager.set_synchronous_mode(True)
+        traffic_manager.set_synchronous_mode(True)
 
-        display = pygame.display.set_mode(
-            (args.width, args.height),
-            pygame.HWSURFACE | pygame.DOUBLEBUF)
+    display = pygame.display.set_mode(
+        (args.width, args.height),
+        pygame.HWSURFACE | pygame.DOUBLEBUF)
 
-        hud = HUD(args.width, args.height)
-        world = World(client.get_world(), hud, args)
-        controller = KeyboardControl(world)
-        if args.agent == "Basic":
-            agent = BasicAgent(world.player, 30)
-            agent.follow_speed_limits(True)
-        elif args.agent == "Constant":
-            agent = ConstantVelocityAgent(world.player, 30)
-            ground_loc = world.world.ground_projection(world.player.get_location(), 5)
-            if ground_loc:
-                world.player.set_location(ground_loc.location + carla.Location(z=0.01))
-            agent.follow_speed_limits(True)
-        elif args.agent == "Behavior":
-            agent = BehaviorAgent(world.player, behavior=args.behavior)
+    hud = HUD(args.width, args.height)
+    world = World(client.get_world(), hud, args)
+    controller = KeyboardControl(world)
+    if args.agent == "Basic":
+        agent = BasicAgent(world.player, 30)
+        agent.follow_speed_limits(True)
+    elif args.agent == "Constant":
+        agent = ConstantVelocityAgent(world.player, 30)
+        ground_loc = world.world.ground_projection(world.player.get_location(), 5)
+        if ground_loc:
+            world.player.set_location(ground_loc.location + carla.Location(z=0.01))
+        agent.follow_speed_limits(True)
+    elif args.agent == "Behavior":
+        agent = BehaviorAgent(world.player, behavior=args.behavior)
 
-        # Set the agent destination
-        spawn_points = world.map.get_spawn_points()
-        destination = random.choice(spawn_points).location
-        agent.set_destination(destination)
+    # Set the agent destination
+    spawn_points = world.map.get_spawn_points()
+    destination = random.choice(spawn_points).location
+    agent.set_destination(destination)
 
-        clock = pygame.time.Clock()
+    clock = pygame.time.Clock()
 
-        while True:
-            clock.tick()
-            if args.sync:
-                world.world.tick()
-            else:
-                world.world.wait_for_tick()
-            if controller.parse_events():
-                return
-
-            world.tick(clock)
-            world.render(display)
-            pygame.display.flip()
-
-            if agent.done():
-                if args.loop:
-                    agent.set_destination(random.choice(spawn_points).location)
-                    world.hud.notification("Target reached", seconds=4.0)
-                    print("The target has been reached, searching for another target")
-                else:
-                    print("The target has been reached, stopping the simulation")
-                    break
-
-            control = agent.run_step()
-            control.manual_gear_shift = False
-            world.player.apply_control(control)
-
-    finally:
-
-        if world is not None:
-            settings = world.world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            world.world.apply_settings(settings)
-            traffic_manager.set_synchronous_mode(True)
-
-            world.destroy()
-
-        pygame.quit()
+    return clock, world, controller, display, agent, spawn_points
 
 
 # ==============================================================================
@@ -830,11 +803,17 @@ def main():
     logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
 
     logging.info('listening to server %s:%s', args.host, args.port)
+    yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
 
     print(__doc__)
 
     try:
-        game_loop(args)
+        clock, world, controller, display, agent, spawn_points = game_start(args)
+        while True:
+            game_step(clock, world, controller, display, agent, spawn_points)
+            if world.camera_manager.img is not None:
+                results = yolo_model(world.camera_manager.img)
+                results.print()
 
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')
