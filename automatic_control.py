@@ -17,6 +17,7 @@ import glob
 import logging
 import math
 import os
+import torch
 import numpy.random as random
 import re
 import sys
@@ -233,6 +234,10 @@ class World(object):
         """Render world"""
         self.camera_manager.render(display)
         self.hud.render(display)
+        #print out yolo
+        if self.camera_manager.img is not None:
+            results = yolo_model(self.camera_manager.img)
+            results.print()
 
     def destroy_sensors(self):
         """Destroy sensors"""
@@ -603,6 +608,7 @@ class GnssSensor(object):
 # -- CameraManager -------------------------------------------------------------
 # ==============================================================================
 
+yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
 
 class CameraManager(object):
     """ Class for camera management"""
@@ -646,6 +652,8 @@ class CameraManager(object):
                 blp.set_attribute('range', '50')
             item.append(blp)
         self.index = None
+        self.set_sensor(0)  # This line sets the camera to the front view. Adjust the index if needed.
+        self.img = None
 
     def toggle_camera(self):
         """Activate a camera"""
@@ -694,28 +702,19 @@ class CameraManager(object):
         self = weak_self()
         if not self:
             return
-        if self.sensors[self.index][0].startswith('sensor.lidar'):
-            points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
-            points = np.reshape(points, (int(points.shape[0] / 4), 4))
-            lidar_data = np.array(points[:, :2])
-            lidar_data *= min(self.hud.dim) / 100.0
-            lidar_data += (0.5 * self.hud.dim[0], 0.5 * self.hud.dim[1])
-            lidar_data = np.fabs(lidar_data)  # pylint: disable=assignment-from-no-return
-            lidar_data = lidar_data.astype(np.int32)
-            lidar_data = np.reshape(lidar_data, (-1, 2))
-            lidar_img_size = (self.hud.dim[0], self.hud.dim[1], 3)
-            lidar_img = np.zeros(lidar_img_size)
-            lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
-            self.surface = pygame.surfarray.make_surface(lidar_img)
-        else:
-            image.convert(self.sensors[self.index][1])
-            array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-            array = np.reshape(array, (image.height, image.width, 4))
-            array = array[:, :, :3]
-            array = array[:, :, ::-1]
-            self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
-        if self.recording:
-            image.save_to_disk('_out/%08d' % image.frame)
+        image.convert(self.sensors[self.index][1])
+        array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+        array = np.reshape(array, (image.height, image.width, 4))
+        array = array[:, :, :3]
+        array = array[:, :, ::-1]
+        # Convert array to an image and then to a format YOLO can process
+        img = array.swapaxes(0, 1)
+        self.img = img
+        # Add your custom code here to use the results from the YOLO model,
+        # for example, for visualization or decision-making in autonomous driving.
+
+        # Convert the array to a pygame surface and display it
+        self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
 
 # ==============================================================================
 # -- Game Loop ---------------------------------------------------------
