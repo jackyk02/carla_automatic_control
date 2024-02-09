@@ -1,0 +1,98 @@
+target Python {
+  threading: True
+}
+
+preamble {=
+  from automatic_control import Args, logging, torch, game_start, game_step
+  args = Args()
+
+  args.width, args.height = [int(x) for x in args.res.split('x')]
+
+  log_level = logging.DEBUG if args.debug else logging.INFO
+  logging.basicConfig(format="%(levelname)s: %(message)s", level=log_level)
+
+  logging.info("listening to server %s:%s", args.host, args.port)
+  yolo_model = torch.hub.load(
+      "ultralytics/yolov5", "yolov5s", pretrained=True)
+=}
+
+reactor Carla {
+  input actions
+  output agent_out
+  output img_out
+
+  state clock
+  state world
+  state controller
+  state display
+  state agent
+  state spawn_points
+
+  reaction(startup) -> agent_out, img_out {=
+    self.clock, self.world, self.controller, self.display, self.agent, self.spawn_points = game_start(args)
+    game_step(self.clock, self.world, self.controller, self.display, self.agent, self.spawn_points)
+
+    agent_out.set(self.agent)
+    img_out.set(self.world.camera_manager.img)
+  =}
+
+  reaction(actions) -> agent_out, img_out {=
+    self.world.player.apply_control(actions.value)
+    game_step(self.clock, self.world, self.controller, self.display, self.agent, self.spawn_points)
+    agent_out.set(self.agent)
+    img_out.set(self.world.camera_manager.img)
+  =}
+}
+
+reactor Yolo {
+  input img
+  output yolo_actions
+
+  reaction(startup) {=  =}
+
+  reaction(img) -> yolo_actions {=
+    if img.value is not None:
+        results = yolo_model(img.value)
+        results.print()
+        yolo_actions.set(None)
+  =}
+}
+
+reactor PID {
+  input agent
+  output pid_actions
+
+  reaction(startup) {=  =}
+
+  reaction(agent) -> pid_actions {=
+    control = agent.value.run_step()
+    control.manual_gear_shift = False
+    pid_actions.set(control)
+  =}
+}
+
+reactor fusion {
+  input yolo_actions
+  input pid_actions
+
+  output final_actions
+
+  reaction(startup) {=  =}
+
+  reaction(yolo_actions, pid_actions) -> final_actions {=
+    final_actions.set(pid_actions.value)
+  =}
+}
+
+main reactor {
+  carla = new Carla()
+  yolo = new Yolo()
+  pid = new PID()
+  fusion = new fusion()
+
+  carla.img_out -> yolo.img
+  carla.agent_out -> pid.agent
+  yolo.yolo_actions -> fusion.yolo_actions
+  pid.pid_actions -> fusion.pid_actions
+  fusion.final_actions -> carla.actions after 0
+}
